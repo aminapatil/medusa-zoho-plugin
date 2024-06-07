@@ -26,6 +26,7 @@ class ZohoService extends TransactionBaseService {
     protected readonly moneyAmountRepository_: typeof MoneyAmountRepository;
     protected readonly customerRepository_: typeof CustomerRepository;
     protected readonly cartRepository_: typeof CartRepository;
+    // protected readonly stockLocationService_: StockLocationService;
     protected readonly accessTokenService_: AccessTokenService;
     protected zohoAuthData: any;
 
@@ -38,6 +39,7 @@ class ZohoService extends TransactionBaseService {
         this.orderService_ = container.orderService
         this.customerRepository_ = container.customerRepository
         this.cartRepository_ = container.cartRepository
+        // this.stockLocationService_ = container.stockLocationService
         this.accessTokenService_ = container.accessTokenService
     }
 
@@ -99,7 +101,7 @@ class ZohoService extends TransactionBaseService {
         // let accessToken = await this.accessTokenService_.getAccessTokenByClient(clientConstant.ZOHO);
         // const tokenData = await this.getAccessTokenDB()
         const store = DataStore.getInstance();
-        const value = store.get('zoho');    
+        const value = store.get('zoho');
         console.log("****** ZOHO AUTH DATA ******", value)
         if (value?.length > 0) {
             console.log("****** IN SAVE ACCESS UPDTAE CALL ******")
@@ -128,19 +130,23 @@ class ZohoService extends TransactionBaseService {
         console.log('***** ZOHO ITEM CREATION *****:');
         await this.getAccessTokenDB();
         const taxDetail: any = await this.getTaxDetail();
+        console.log("******** ITEM CREATION TAX RESPONSE **********", taxDetail);
         let product = await this.productService_.retrieve(product_id, { relations: ["variants", "variants.prices"] })
         let url = `/books/v3/items?organization_id=${process.env.ZOHO_ORGANIZATION_ID}`;
         if (product) {
             product.variants?.forEach(async (lineItem) => {
                 if (variant_id == lineItem.id) {
                     let price = lineItem.prices.find(pr => pr.currency_code == "inr");
-                    let amount = formatAmount({ amount: price?.amount, region: price.region, includeTaxes: false })
+                    let amount = 0;
+                    if (price) formatAmount({ amount: price?.amount, region: price.region, includeTaxes: false })
                     let item_tax_preferences = [];
                     taxDetail.map(tax => {
-                        item_tax_preferences.push({
-                            "tax_id": tax?.tax_id,
-                            "tax_specification": tax?.tax_specification
-                        });
+                        if (tax.tax_name !== "GST0") {
+                            item_tax_preferences.push({
+                                "tax_id": tax?.tax_id,
+                                "tax_specification": tax?.tax_specification
+                            });
+                        }
                     });
                     console.log('***** IN ZOHO ITEM CREATION *****:item_tax_preferences----->', item_tax_preferences)
                     let payload: any = {
@@ -220,8 +226,8 @@ class ZohoService extends TransactionBaseService {
         console.log("***** IN GET TAX DETAIL CALL AUTH DATA *****", value)
         try {
             return await (await this.client(value)).get(url).then((res: any) => {
-                console.log("***** ZOHO TAX DETAIL RESPONSE *****", res);
-                let taxNameJson = JSON.parse(process.env.ZOHO_TAX_NAME);
+                console.log("***** ZOHO TAX DETAIL RESPONSE *****", res?.data);
+                let taxNameJson = process.env.ZOHO_TAX_NAME;
                 return res?.data.taxes?.filter((tax: any) => taxNameJson.includes(tax.tax_name));
             }).catch((error) => {
                 console.log("***** ZOHO TAX DETAIL RESPONSE *****", error)
@@ -341,13 +347,13 @@ class ZohoService extends TransactionBaseService {
 
             if (customer) {
                 console.log("***** IN ZOHO CREATE CONTACT : CUSTOMER EXISTS : UPDATE METADATA *****");
-                let metadata = customer.metadata;
+                let metadata = { ...customer.metadata };
                 if (metadata) {
                     metadata.zoho = contactId;
                 } else {
                     metadata = { "zoho": contactId }
                 }
-                customer.metadata = metadata;
+                customer.metadata = { ...metadata };
                 await this.customerRepository_.save(customer);
             }
             return response;
@@ -477,7 +483,7 @@ class ZohoService extends TransactionBaseService {
             // const productsResponse = await this.productService_.retrieve(queryParams.id)
             // let url = 
             const productsResponse = await axios.create({
-                baseURL: "http://localhost:9000",
+                baseURL: process.env.ADMIN_BACKEND_URL,
                 headers: {
                     'content-type': 'application/json',
                 },
@@ -536,13 +542,19 @@ class ZohoService extends TransactionBaseService {
 
         let line = []
         details.items.map((item, index) => {
-            let discount = "0";
+            let discount: any = "0";
             if (item.variant.calculated_price_type == 'sale') {
-                discount = getProductPrice({ variant: [item.variant], region: order.region }).cheapestPrice.percentage_diff + "%";
+                console.log("********** CREATE INVOICE : ITEM VARIANT ***********", item?.variant)
+                if (item?.discount_total > 0) {
+                    discount = getProductPrice({ variant: [item.variant], region: order.region, total: (item?.subtotal - item?.discount_total), quantity: item.quantity }).cheapestPrice.discountAmt;
+                } else {
+                    discount = getProductPrice({ variant: [item.variant], region: order.region, quantity: item.quantity }).cheapestPrice.discountAmtSale;
+                }
             } else if (item?.discount_total > 0) {
-                discount = formatAmount({ amount: item.discount_total, region: null, includeTaxes: false })
+                discount = item.discount_total //formatAmount({ amount: item.discount_total, region: null, includeTaxes: false })
             }
-            line.push({
+            console.log("********** LINE ITEM DISCOUNT PERCENTAGE **********", discount)
+            let ln: any = {
                 item_id: item.variant?.metadata?.zoho?.item_id,
                 product_type: "goods",
                 name: item.title,
@@ -551,12 +563,21 @@ class ZohoService extends TransactionBaseService {
                 item_order: index + 1,//no - sequence
                 rate: formatAmount({ amount: item.variant.original_price, region: null, includeTaxes: false }),
                 quantity: item.quantity,
-                discount: discount,
-                // tax_id: taxDetail?.tax_id,
-                // tax_name: taxDetail.tax_name,
-                // tax_type: taxDetail?.tax_type,
-                // tax_percentage: taxDetail?.tax_percentage
-            })
+                discount: formatAmount({ amount: discount, region: null, includeTaxes: false }),
+
+            }
+            if (item.original_tax_total == 0) {
+                taxDetail.map(tax => {
+                    if (tax.tax_name == "GST0") {
+                        ln.tax_id = tax?.tax_id,
+                            ln.tax_name = tax.tax_name,
+                            ln.tax_type = tax?.tax_type,
+                            ln.tax_percentage = tax?.tax_percentage
+                    }
+                });
+
+            }
+            line.push(ln)
         })
 
         const payload: any = {
@@ -564,9 +585,9 @@ class ZohoService extends TransactionBaseService {
             gst_treatment: "consumer",
             // gst_no: process.env.ZOHO_GST_NO || "22AAAAA0000A1Z5",//no , store in env //TBD only for business
             date: formattedDate,
-            discount: order.gift_card_total > 0 && formatAmount({ amount: order.gift_card_total, region: null, includeTaxes: false }) || 0, // order.discount.,
+            discount: (order.discount_total > 0) && formatAmount({ amount: order.discount_total, region: null, includeTaxes: false }) || 0, // order.discount.,
             is_discount_before_tax: true,//no
-            discount_type: order.gift_card_total > 0 ? "entity_level" : "item_level",
+            discount_type: "item_level",
             is_inclusive_tax: false,
             line_items: line,
             allow_partial_payments: false,
@@ -585,8 +606,13 @@ class ZohoService extends TransactionBaseService {
         try {
             const store = DataStore.getInstance();
             const value = store.get(ZohoService.ZOHO_DATA_KEY);
-            return await (await this.client(value)).post(url, payload).then((res: any) => {
+            return await (await this.client(value)).post(url, payload).then(async (res: any) => {
                 console.log("***** IN ZOHO CREATE INVOICE : RESPONSE *****", res)
+                // if (res?.data.invoice.invoice_id) {
+                //     await this.orderService_.update(order.id, {
+                //         metadata: { ...order.metadata, invoice_id: res?.data.invoice.invoice_id }
+                //     });
+                // };
                 return this.getGeneratedInvoice(res?.data.invoice.invoice_id, value)
             }).catch(e => {
                 console.error("***** ZOHO CREATE INVOICE ERROR *****", e.response.data);
@@ -608,14 +634,15 @@ class ZohoService extends TransactionBaseService {
     async getGeneratedInvoice(invoice_id: string, value) {
         console.log("***** IN ZOHO GENERATE INVOICE : INVOICE_ID *****", invoice_id)
         await this.getAccessTokenDB();
-
+        const store = DataStore.getInstance();
+        const storeValue = store.get(ZohoService.ZOHO_DATA_KEY) || value;
         const url = `/books/v3/invoices/pdf?organization_id=${process.env.ZOHO_ORGANIZATION_ID}&invoice_ids=${invoice_id}`;
         try {
-            const response = await (await this.client(value)).get(url, { responseType: "arraybuffer" });
+            const response = await (await this.client(storeValue)).get(url, { responseType: "arraybuffer" });
             console.log("***** GENERATE INVOICE PDF RESPONSE : ", response);
             if (response.status === 200) {
                 console.log("***** IN ZOHO GENERATE INVOICE : RESPONSE *****", response.data)
-                await this.markInvoiceAsSend(invoice_id, value);
+                await this.markInvoiceAsSend(invoice_id, storeValue);
                 return {
                     invoice_id: invoice_id,
                     data: response.data
@@ -663,7 +690,7 @@ class ZohoService extends TransactionBaseService {
             authData = await this.generateAccessTokenFromRefreshToken()
         }
 
-        
+
         // Generate token if expired
         if (authData.length > 0 && (now.getTime().toString() > authData[0].expires_in)) {
             console.log("***** ZOHO CLIENT: IN TOKEN REFRESH CALL IF TOKEN EXPIRED *****", authData, "***** TIME : ", now.getTime().toString())

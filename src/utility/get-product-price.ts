@@ -3,9 +3,13 @@ import { formatAmount } from "./index"
 export function getProductPrice({
   variant,
   region,
+  total,
+  quantity
 }: {
   variant?: any
   region: any
+  total?: any
+  quantity?: any
 }) {
   if (!variant) {
     console.log("No product provided")
@@ -15,7 +19,7 @@ export function getProductPrice({
     const diff = original - calculated
     const decrease = (diff / original) * 100
 
-    return decrease.toFixed()
+    return decrease.toFixed(3)
   }
 
   const cheapestPrice = () => {
@@ -27,7 +31,7 @@ export function getProductPrice({
     const cheapestVariant = variant.reduce((prev, curr) => {
       return prev.calculated_price < curr.calculated_price ? prev : curr
     })
-
+    console.log("********* CHEAPEST PRICE ***********", cheapestVariant);
     return {
       calculated_price: formatAmount({
         amount: cheapestVariant.calculated_price,
@@ -44,6 +48,12 @@ export function getProductPrice({
         cheapestVariant.original_price,
         cheapestVariant.calculated_price
       ),
+      discountPerc: getPercentageDiff(
+        cheapestVariant.original_price,
+        total
+      ),
+      discountAmt: (cheapestVariant.original_price * quantity) - total,
+      discountAmtSale: (cheapestVariant.original_price * quantity) - (cheapestVariant.calculated_price * quantity),
     }
   }
 
